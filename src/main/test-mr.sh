@@ -15,6 +15,8 @@ mkdir mr-tmp || exit 1
 cd mr-tmp || exit 1
 rm -f mr-*
 
+alias timeout=gtimeout
+
 # make sure software is freshly built.
 (cd ../../mrapps && go build $RACE -buildmode=plugin wc.go) || exit 1
 (cd ../../mrapps && go build $RACE -buildmode=plugin indexer.go) || exit 1
@@ -130,7 +132,7 @@ wait ; wait
 
 
 echo '***' Starting reduce parallelism test.
-
+rm -f mr-*
 rm -f mr-out* mr-worker*
 
 timeout -k 2s 180s ../mrmaster ../pg*txt &
@@ -152,13 +154,13 @@ fi
 wait ; wait
 
 
+rm -f mr-*
 # generate the correct output
 ../mrsequential ../../mrapps/nocrash.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-crash.txt
 rm -f mr-out*
 
 echo '***' Starting crash test.
-
 rm -f mr-done
 (timeout -k 2s 180s ../mrmaster ../pg*txt ; touch mr-done ) &
 sleep 1
