@@ -160,6 +160,7 @@ func (rf *Raft) startElection() {
 	// make self to candidate
 	rf.state = 1
 	rf.currentTerm++
+	rf.votedFor[rf.currentTerm] = rf.me
 	fmt.Printf("[%d] startElection term %d \n", rf.me, rf.currentTerm)
 
 	voteChan := make(chan bool, 10)
