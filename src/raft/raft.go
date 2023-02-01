@@ -131,6 +131,7 @@ type AppendEntriesArgs struct {
 	PreviousLogTerm  int
 	Command          interface{}
 	Index            int
+	CommittedIndex   map[int]bool
 }
 
 type AppendEntriesReply struct {
@@ -148,14 +149,25 @@ func (rf *Raft) CommitEntries(args *CommitEntriesArgs, reply *CommitEntriesReply
 	fmt.Printf("[%d] CommitEntries, index %d\n", rf.me, args.Index)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Index < len(rf.logs) && rf.committedIndex[args.Index-1] {
+	rf.committedIndex[args.Index] = true
+	for i := 0; i < len(rf.logs); i++ {
+		fmt.Printf("[%d] committing for index %d\n", rf.me, i)
+		if !rf.committedIndex[i] {
+			break
+		}
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
-			CommandIndex: args.Index,
-			Command:      rf.logs[args.Index].Command,
+			CommandIndex: i,
+			Command:      rf.logs[i].Command,
 		}
 	}
-	rf.committedIndex[args.Index] = true
+	// if args.Index < len(rf.logs) && rf.committedIndex[args.Index-1] {
+	// 	rf.applyCh <- ApplyMsg{
+	// 		CommandValid: true,
+	// 		CommandIndex: args.Index,
+	// 		Command:      rf.logs[args.Index].Command,
+	// 	}
+	// }
 }
 
 func (rf *Raft) sendCommitEntries(server int, args *CommitEntriesArgs, reply *CommitEntriesReply) bool {
@@ -180,36 +192,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.lastHeartBeat = currentTime
 	}
 
-	if args.Logs == nil {
-		// just heartbeat
-		return
-	}
-	if len(rf.logs)-1 < args.PreviousLogIndex {
-		fmt.Printf("[%d] reject append, no previous log at index %d\n", rf.me, args.PreviousLogIndex)
-		reply.Ok = false
-		return
-	}
-	if args.PreviousLogIndex > -1 {
-		lastLog := rf.logs[args.PreviousLogIndex]
-		if lastLog.Term != args.PreviousLogTerm {
-			fmt.Printf("[%d] reject append, my previous term %d, expected %d\n", rf.me, lastLog.Term, args.PreviousLogTerm)
+	if args.Logs != nil {
+		if len(rf.logs)-1 < args.PreviousLogIndex {
+			fmt.Printf("[%d] reject append, no previous log at index %d\n", rf.me, args.PreviousLogIndex)
 			reply.Ok = false
 			return
 		}
+		if args.PreviousLogIndex > -1 {
+			lastLog := rf.logs[args.PreviousLogIndex]
+			if lastLog.Term != args.PreviousLogTerm {
+				fmt.Printf("[%d] reject append, my previous term %d, expected %d\n", rf.me, lastLog.Term, args.PreviousLogTerm)
+				reply.Ok = false
+				return
+			}
+		}
+		fmt.Printf("[%d] log index %d applied\n", rf.me, args.Index)
+		reply.Ok = true
+		rf.logs = append(rf.logs[:args.PreviousLogIndex+1], args.Logs...)
 	}
-	fmt.Printf("[%d] log index %d applied\n", rf.me, args.Index)
-	reply.Ok = true
-	rf.logs = append(rf.logs[:args.PreviousLogIndex+1], args.Logs...)
-	for i := args.PreviousLogIndex + 1; i < len(rf.logs); i++ {
-		fmt.Printf("[%d] committing for index %d\n", rf.me, i)
-		if !rf.committedIndex[i] {
+
+	for i := 0; i < len(rf.logs); i++ {
+		if !args.CommittedIndex[i] {
 			break
 		}
+		if rf.committedIndex[i] {
+			continue
+		}
+		fmt.Printf("[%d] committing for index %d\n", rf.me, i)
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
 			CommandIndex: i,
 			Command:      rf.logs[i].Command,
 		}
+		rf.committedIndex[i] = true
 	}
 }
 
@@ -242,6 +257,7 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 						PreviousLogIndex: lastIndex,
 						PreviousLogTerm:  lastTerm,
 						Index:            index,
+						CommittedIndex:   rf.committedIndex,
 					}
 					reply := AppendEntriesReply{}
 					command := "AppendEntries"
@@ -271,31 +287,42 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 	if !isHeartBeat {
 		go func() {
 			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			for int(appendSuccess) < (len(rf.peers)-1)/2 {
 				cond.Wait()
 			}
-			rf.mu.Unlock()
 			if int(appendSuccess) >= (len(rf.peers)-1)/2 {
 				fmt.Printf("[%d] start log committing, index %d, command %v\n", rf.me, index, command)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					CommandIndex: index,
-					Command:      command,
-				}
-				var wg sync.WaitGroup
-				for i := range rf.peers {
-					if i != rf.me {
-						wg.Add(1)
-						go func(peer int) {
-							defer wg.Done()
-							arg := CommitEntriesArgs{
-								Index: index,
-							}
-							reply := CommitEntriesReply{}
-							rf.sendCommitEntries(peer, &arg, &reply)
-						}(i)
+				rf.committedIndex[index] = true
+				for i := 0; i < len(rf.logs); i++ {
+					if !rf.committedIndex[i] {
+						break
+					}
+					rf.applyCh <- ApplyMsg{
+						CommandValid: true,
+						CommandIndex: i,
+						Command:      rf.logs[i].Command,
 					}
 				}
+				// rf.applyCh <- ApplyMsg{
+				// 	CommandValid: true,
+				// 	CommandIndex: index,
+				// 	Command:      command,
+				// }
+				// var wg sync.WaitGroup
+				// for i := range rf.peers {
+				// 	if i != rf.me {
+				// 		wg.Add(1)
+				// 		go func(peer int) {
+				// 			defer wg.Done()
+				// 			arg := CommitEntriesArgs{
+				// 				Index: index,
+				// 			}
+				// 			reply := CommitEntriesReply{}
+				// 			rf.sendCommitEntries(peer, &arg, &reply)
+				// 		}(i)
+				// 	}
+				// }
 				// wg.Wait()
 				fmt.Printf("[%d] log committed, index %d, command %v\n", rf.me, index, command)
 			}
