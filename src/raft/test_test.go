@@ -205,7 +205,7 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	n, _ := cfg.nCommitted(index)
 	if n > 0 {
-		t.Fatalf("%v committed but no majority", n)
+		t.Fatalf("%v committed %d but no majority", n, index)
 	}
 
 	// repair
