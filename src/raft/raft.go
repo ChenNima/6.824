@@ -52,6 +52,11 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type RaftLog struct {
+	Command interface{}
+	Term    int
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -65,6 +70,8 @@ type Raft struct {
 	state         int
 	lastHeartBeat time.Time
 	votedFor      map[int]int
+
+	logs []RaftLog
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -115,7 +122,8 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 type AppendEntriesArgs struct {
-	Term int
+	Term    int
+	Command interface{}
 }
 
 type AppendEntriesReply struct {
@@ -141,15 +149,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	go func(lastHeartBeat time.Time) {
 		n := rand.Intn(heartBeatTimeoutRand)
 		time.Sleep(time.Duration(heartBeatTimeout+n) * time.Millisecond)
-		if rf.lastHeartBeat.Before(lastHeartBeat) || rf.lastHeartBeat.Equal(lastHeartBeat) {
+		if !rf.lastHeartBeat.After(lastHeartBeat) {
+			fmt.Printf("[%d] heartbeat timeout, start election\n", rf.me)
 			rf.startElection()
 		}
 	}(currentTime)
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+func (rf *Raft) sendAppendEntries(command interface{}) {
+	for i := range rf.peers {
+		if i != rf.me {
+			go func(peer int, currentTerm int) {
+				arg := AppendEntriesArgs{
+					Term:    currentTerm,
+					Command: command,
+				}
+				reply := AppendEntriesReply{}
+				fmt.Printf("[%d] sending AppendEntries to %d\n", rf.me, peer)
+				rf.peers[peer].Call("Raft.AppendEntries", &arg, &reply)
+			}(i, rf.currentTerm)
+		}
+	}
 }
 
 func (rf *Raft) startElection() {
@@ -220,17 +240,7 @@ func (rf *Raft) startLeader() {
 	for rf.state == 2 {
 		rf.mu.Lock()
 		if rf.state == 2 {
-			for i := range rf.peers {
-				if i != rf.me {
-					go func(peer int, currentTerm int) {
-						arg := AppendEntriesArgs{
-							Term: currentTerm,
-						}
-						reply := AppendEntriesReply{}
-						rf.sendAppendEntries(peer, &arg, &reply)
-					}(i, rf.currentTerm)
-				}
-			}
+			rf.sendAppendEntries(nil)
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(heartBeatPeriod) * time.Millisecond)
@@ -314,8 +324,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
-	isLeader := true
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term, isLeader := rf.GetState()
+	if !isLeader {
+		return index, term, isLeader
+	}
 
 	// Your code here (2B).
 
@@ -360,6 +375,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.state = 0
+	rf.logs = []RaftLog{}
 
 	go func() {
 		rand.Seed(time.Now().UnixNano())
