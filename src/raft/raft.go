@@ -169,6 +169,7 @@ func (rf *Raft) startElection() {
 	votedForMe := 0
 	timeout := false
 	electionFinished := false
+	electionTerm := rf.currentTerm
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(peer int, electionTerm int) {
@@ -183,7 +184,7 @@ func (rf *Raft) startElection() {
 				if !electionFinished {
 					voteChan <- success && reply.Ok
 				}
-			}(i, rf.currentTerm)
+			}(i, electionTerm)
 		}
 	}
 	rf.mu.Unlock()
@@ -206,7 +207,7 @@ func (rf *Raft) startElection() {
 	fmt.Printf("[%d] electionFinished, votedForMe: %d voted: %d timeout: %v\n", rf.me, votedForMe, voted, timeout)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if (votedForMe >= (len(rf.peers)-1)/2) && rf.state == 1 {
+	if (votedForMe >= (len(rf.peers)-1)/2) && rf.state == 1 && rf.currentTerm == electionTerm {
 		rf.state = 2
 		go rf.startLeader()
 	} else if rf.state == 1 {
@@ -263,6 +264,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		reply.Ok = true
 		rf.votedFor[args.Term] = args.Id
+		rf.currentTerm = args.Term
 	}
 }
 
