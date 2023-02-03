@@ -30,7 +30,7 @@ import (
 var heartBeatPeriod = 100
 var heartBeatTimeout = 300
 var heartBeatTimeoutRand = 150
-var electionBeatTimeout = 300
+var electionBeatTimeout = 800
 var electionBeatTimeoutRand = 150
 
 // import "bytes"
@@ -74,7 +74,7 @@ type Raft struct {
 	logs []RaftLog
 
 	applyCh        chan ApplyMsg
-	committedIndex map[int]bool
+	committedIndex map[int]int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -131,55 +131,25 @@ type AppendEntriesArgs struct {
 	PreviousLogTerm  int
 	Command          interface{}
 	Index            int
-	CommittedIndex   map[int]bool
+	CommittedIndex   map[int]int
 }
 
 type AppendEntriesReply struct {
-	Ok bool
-}
-
-type CommitEntriesArgs struct {
-	Index int
+	Ok       bool
+	AxTerm   int
+	AxIndex  int
+	AxLength int
 }
 
 type CommitEntriesReply struct {
 }
 
-func (rf *Raft) CommitEntries(args *CommitEntriesArgs, reply *CommitEntriesReply) {
-	fmt.Printf("[%d] CommitEntries, index %d\n", rf.me, args.Index)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.committedIndex[args.Index] = true
-	for i := 0; i < len(rf.logs); i++ {
-		fmt.Printf("[%d] committing for index %d\n", rf.me, i)
-		if !rf.committedIndex[i] {
-			break
-		}
-		rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			CommandIndex: i,
-			Command:      rf.logs[i].Command,
-		}
-	}
-	// if args.Index < len(rf.logs) && rf.committedIndex[args.Index-1] {
-	// 	rf.applyCh <- ApplyMsg{
-	// 		CommandValid: true,
-	// 		CommandIndex: args.Index,
-	// 		Command:      rf.logs[args.Index].Command,
-	// 	}
-	// }
-}
-
-func (rf *Raft) sendCommitEntries(server int, args *CommitEntriesArgs, reply *CommitEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.CommitEntries", args, reply)
-	return ok
-}
-
 // example RequestVote RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Printf("[%d] received AppendEntries, term %d\n", rf.me, args.Term)
+	// fmt.Printf("[%d] received AppendEntries, term %d\n", rf.me, args.Term)
 	if rf.currentTerm > args.Term {
 		// ignore terms less then self
+		fmt.Printf("[%d] ignore, has higher term %d\n", rf.me, rf.currentTerm)
 		return
 	}
 	rf.mu.Lock()
@@ -195,13 +165,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Logs != nil {
 		if len(rf.logs)-1 < args.PreviousLogIndex {
 			fmt.Printf("[%d] reject append, no previous log at index %d\n", rf.me, args.PreviousLogIndex)
+			reply.AxTerm = -1
+			reply.AxIndex = -1
+			reply.AxLength = len(rf.logs)
 			reply.Ok = false
+			fmt.Printf("[%d] %v\n", rf.me, reply)
 			return
 		}
 		if args.PreviousLogIndex > -1 {
 			lastLog := rf.logs[args.PreviousLogIndex]
 			if lastLog.Term != args.PreviousLogTerm {
+				reply.AxTerm = lastLog.Term
+				for i, log := range rf.logs {
+					if log.Term != lastLog.Term {
+						continue
+					} else {
+						reply.AxIndex = i
+						break
+					}
+				}
+				reply.AxLength = len(rf.logs)
 				fmt.Printf("[%d] reject append, my previous term %d, expected %d\n", rf.me, lastLog.Term, args.PreviousLogTerm)
+				fmt.Printf("[%d] %v\n", rf.me, reply)
 				reply.Ok = false
 				return
 			}
@@ -212,19 +197,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	for i := 0; i < len(rf.logs); i++ {
-		if !args.CommittedIndex[i] {
+		if args.CommittedIndex[i] != rf.logs[i].Term {
 			break
 		}
-		if rf.committedIndex[i] {
+		if rf.committedIndex[i] != 0 {
 			continue
 		}
-		fmt.Printf("[%d] committing for index %d\n", rf.me, i)
+		fmt.Printf("[%d] committing for index %d, pre: %d\n", rf.me, i, args.PreviousLogIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
 			CommandIndex: i,
 			Command:      rf.logs[i].Command,
 		}
-		rf.committedIndex[i] = true
+		rf.committedIndex[i] = rf.logs[i].Term
 	}
 }
 
@@ -235,7 +220,7 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 		if i != rf.me {
 			go func(peer int, currentTerm int) {
 				ok := false
-				for !ok && lastIndex >= -1 {
+				for !ok && lastIndex > -1 && rf.state == 2 {
 					lastTerm := 0
 					if lastIndex >= 0 {
 						lastTerm = rf.logs[lastIndex].Term
@@ -249,7 +234,7 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 						}
 					}
 					if !isHeartBeat {
-						fmt.Printf("[%d] sending log length %v\n", rf.me, len(logs))
+						fmt.Printf("[%d] sending log to %d length %v\n", rf.me, peer, len(logs))
 					}
 					arg := AppendEntriesArgs{
 						Term:             currentTerm,
@@ -260,18 +245,47 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 						CommittedIndex:   rf.committedIndex,
 					}
 					reply := AppendEntriesReply{}
-					command := "AppendEntries"
-					if isHeartBeat {
-						command = "HeartBeat"
+					// command := "AppendEntries"
+					// if isHeartBeat {
+					// 	command = "HeartBeat"
+					// }
+					// fmt.Printf("[%d] sending %s to %d\n", rf.me, command, peer)
+					rpcSuccess := rf.peers[peer].Call("Raft.AppendEntries", &arg, &reply)
+					if !rpcSuccess {
+						continue
 					}
-					fmt.Printf("[%d] sending %s to %d\n", rf.me, command, peer)
-					rf.peers[peer].Call("Raft.AppendEntries", &arg, &reply)
 					if isHeartBeat {
 						ok = true
 					} else {
 						ok = reply.Ok
 						if !ok {
-							lastIndex--
+							if reply.AxLength == 0 {
+								fmt.Printf("[%d] detect higher term, stop append\n", rf.me)
+								rf.state = 0
+								break
+							}
+							fmt.Printf("[%d] false reply from %d: %v\n", rf.me, peer, reply)
+							if reply.AxTerm == -1 {
+								lastIndex = reply.AxLength - 1
+							} else {
+								hasTerm := false
+								start := reply.AxLength - 1
+								if len(rf.logs) < reply.AxLength {
+									start = len(rf.logs) - 1
+								}
+								for i := start - 1; i >= 0; i-- {
+									if rf.logs[i].Term == reply.AxTerm {
+										lastIndex = i
+										break
+									}
+									if rf.logs[i].Term < reply.AxTerm {
+										break
+									}
+								}
+								if !hasTerm {
+									lastIndex = reply.AxIndex - 1
+								}
+							}
 						}
 					}
 				}
@@ -293,9 +307,9 @@ func (rf *Raft) sendAppendEntriesToAll(lastIndex int, isHeartBeat bool, command 
 			}
 			if int(appendSuccess) >= (len(rf.peers)-1)/2 {
 				fmt.Printf("[%d] start log committing, index %d, command %v\n", rf.me, index, command)
-				rf.committedIndex[index] = true
+				rf.committedIndex[index] = rf.logs[index].Term
 				for i := 0; i < len(rf.logs); i++ {
-					if !rf.committedIndex[i] {
+					if rf.committedIndex[i] == 0 {
 						break
 					}
 					rf.applyCh <- ApplyMsg{
@@ -556,8 +570,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.votedFor = make(map[int]int)
-	rf.committedIndex = map[int]bool{
-		0: true,
+	rf.committedIndex = map[int]int{
+		0: -1,
 	}
 
 	rf.currentTerm = 0
